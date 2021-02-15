@@ -18,7 +18,7 @@ export const getMachineStats = async (): Promise<IResourceLoad> => {
     return [null, null];
   });
 
-  const cpu = cpuLoad ? cpuLoad.currentload_user / 100 : null;
+  const cpu = cpuLoad ? cpuLoad.currentLoadUser / 100 : null;
   const memory = memLoad ? memLoad.active / memLoad.total : null;
 
   return {
@@ -27,15 +27,25 @@ export const getMachineStats = async (): Promise<IResourceLoad> => {
   };
 };
 
-export const overloaded = async(): Promise<boolean> => {
+export const overloaded = async(): Promise<{
+    cpuOverloaded: boolean;
+    memoryOverloaded: boolean;
+    cpuInt: number | null;
+    memoryInt: number | null;
+  }> => {
   const { cpu, memory } = await getMachineStats();
   const cpuInt = cpu && Math.ceil(cpu * 100);
   const memoryInt = memory && Math.ceil(memory * 100);
 
   log(`Checking overload status: CPU ${cpuInt}% Memory ${memoryInt}%`);
 
-  const badCPU = cpuInt && (cpuInt >= MAX_CPU_PERCENT);
-  const badMem = memoryInt && (memoryInt >= MAX_MEMORY_PERCENT);
+  const cpuOverloaded = !!(cpuInt && (cpuInt >= MAX_CPU_PERCENT));
+  const memoryOverloaded = !!(memoryInt && (memoryInt >= MAX_MEMORY_PERCENT));
 
-  return !!(badCPU || badMem);
+  return {
+    cpuOverloaded,
+    memoryOverloaded,
+    cpuInt,
+    memoryInt,
+  };
 }

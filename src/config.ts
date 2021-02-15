@@ -107,6 +107,7 @@ export const ENABLE_CORS: boolean = parseJSONParam(process.env.ENABLE_CORS, fals
 export const ENABLE_API_GET: boolean = parseJSONParam(process.env.ENABLE_API_GET, false);
 export const TOKEN: string | null = process.env.TOKEN || null;
 export const ENABLE_HEAP_DUMP: boolean = parseJSONParam(process.env.ENABLE_HEAP_DUMP, false);
+export const ALLOW_FILE_PROTOCOL: boolean = parseJSONParam(process.env.ALLOW_FILE_PROTOCOL, false);
 
 // Puppeteer behavior
 export const DISABLE_AUTO_SET_DOWNLOAD_BEHAVIOR = parseJSONParam(process.env.DISABLE_AUTO_SET_DOWNLOAD_BEHAVIOR, false);
@@ -141,9 +142,7 @@ export const HOST: string | undefined = process.env.HOST;
 export const PORT: number = parseNumber(process.env.PORT, 8080);
 export const SOCKET_CLOSE_METHOD = parseSocketBehavior(process.env.SOCKET_CLOSE_METHOD);
 
-// Host and port for /session calls to build URLs to.
-// Useful for when browserless is behind a proxy
-export const PROXY_HOST: string | undefined = process.env.PROXY_HOST;
-export const PROXY_PORT: string | undefined = process.env.PROXY_PORT;
-export const PROXY_SSL: boolean = parseJSONParam(process.env.PROXY_SSL, false);
+// PROXY URL is used for browserless to build appropriate URLs when it's behind a proxy
+// (must be a fully-qualified URL)
+export const PROXY_URL: string | undefined = process.env.PROXY_URL;
 export const MAX_PAYLOAD_SIZE: string = process.env.MAX_PAYLOAD_SIZE || '5mb';

@@ -15,7 +15,7 @@ import { chromium, BrowserServer } from 'playwright-core';
 
 import { Features } from './features';
 import { browserHook, pageHook } from './hooks';
-import { fetchJson, getDebug, getUserDataDir, rimraf, sleep } from './utils';
+import { fetchJson, getDebug, getUserDataDir, injectHostIntoSession ,rimraf, sleep } from './utils';
 
 import {
   IBrowser,
@@ -25,10 +25,11 @@ import {
   ISession,
   IChromeDriver,
   IHTTPRequest,
-  IJSONList,
+  IDevtoolsJSON,
 } from './types';
 
 import {
+  ALLOW_FILE_PROTOCOL,
   DEFAULT_BLOCK_ADS,
   DEFAULT_DUMPIO,
   DEFAULT_HEADLESS,
@@ -41,9 +42,7 @@ import {
   DISABLED_FEATURES,
   HOST,
   PORT,
-  PROXY_HOST,
-  PROXY_PORT,
-  PROXY_SSL,
+  PROXY_URL,
   WORKSPACE_DIR,
 } from './config';
 
@@ -66,6 +65,10 @@ const BROWSERLESS_ARGS = [
 
 const blacklist = require('../hosts.json');
 const thirtySeconds = 30 * 1000;
+
+const externalURL = PROXY_URL ?
+  new URL(PROXY_URL) :
+  new URL(`http://${HOST || `127.0.0.1`}:${PORT}`);
 
 const removeDataDir = (dir: string | null) => {
   if (dir) {
@@ -105,7 +108,7 @@ const parseIgnoreDefaultArgs = (query: ParsedUrlQuery): string[] | boolean => {
     defaultArgs.split(',');
 };
 
-const getTargets = async ({ port }: { port: string }): Promise<IJSONList[]> =>
+const getTargets = async ({ port }: { port: string }): Promise<IDevtoolsJSON[]> =>
   fetchJson(`http://127.0.0.1:${port}/json/list`);
 
 const isPuppeteer = (browserServer: puppeteer.Browser | BrowserServer): browserServer is puppeteer.Browser => {
@@ -113,12 +116,14 @@ const isPuppeteer = (browserServer: puppeteer.Browser | BrowserServer): browserS
 }
 
 const setupPage = async ({
+  browser,
   page,
   pauseOnConnect,
   blockAds,
   trackingId,
   windowSize,
 }: {
+  browser: IBrowser,
   page: puppeteer.Page;
   pauseOnConnect: boolean;
   blockAds: boolean;
@@ -138,10 +143,13 @@ const setupPage = async ({
       .catch(_.noop);
   }
 
-  if (!DISABLE_AUTO_SET_DOWNLOAD_BEHAVIOR) {
+  // Only inject download behaviors for puppeteer when it's enabled
+  if (!DISABLE_AUTO_SET_DOWNLOAD_BEHAVIOR && isPuppeteer(browser._browserServer)) {
     const workspaceDir = trackingId ?
       path.join(WORKSPACE_DIR, trackingId) :
       WORKSPACE_DIR;
+
+    debug(`Injecting download dir "${workspaceDir}"`);
 
     await client.send('Page.setDownloadBehavior', {
       behavior: 'allow',
@@ -152,6 +160,22 @@ const setupPage = async ({
   if (pauseOnConnect && !DISABLED_FEATURES.includes(Features.DEBUG_VIEWER)) {
     await client.send('Debugger.enable');
     await client.send('Debugger.pause');
+  }
+
+  if (!ALLOW_FILE_PROTOCOL) {
+    page.on('request', async(request) => {
+      if (request.url().startsWith('file://')) {
+        page.close().catch(_.noop);
+        closeBrowser(browser);
+      }
+    });
+
+    page.on('response', async(response) => {
+      if (response.url().startsWith('file://')) {
+        page.close().catch(_.noop);
+        closeBrowser(browser);
+      }
+    });
   }
 
   if (blockAds) {
@@ -227,6 +251,7 @@ const setupBrowser = async ({
       if (page && !page.isClosed()) {
         // @ts-ignore
         setupPage({
+          browser,
           page,
           windowSize,
           blockAds: browser._blockAds,
@@ -241,7 +266,14 @@ const setupBrowser = async ({
 
   const pages = await browser.pages();
 
-  pages.forEach((page) => setupPage({ blockAds, page, pauseOnConnect, trackingId, windowSize }));
+  pages.forEach((page) => setupPage({
+    browser,
+    blockAds,
+    page,
+    pauseOnConnect,
+    trackingId,
+    windowSize,
+  }));
   runningBrowsers.push(browser);
 
   return browser;
@@ -288,60 +320,22 @@ export const findSessionForBrowserUrl = async (pathname: string) => {
   return pages.find((session) => session.browserWSEndpoint.includes(pathname));
 };
 
-export const getDebuggingPages = async (): Promise<ISession[]> => {
+export const getDebuggingPages = async (trackingId?: string): Promise<ISession[]> => {
   const results = await Promise.all(
-    runningBrowsers.map(async (browser) => {
-      const { port } = browser._parsed;
+    runningBrowsers
+      .filter((browser) => typeof trackingId === 'undefined' || browser._trackingId === trackingId)
+      .map(async (browser) => {
+        const { port } = browser._parsed;
 
-      const externalHost = PROXY_HOST ?
-        `${PROXY_HOST}${PROXY_PORT ? `:${PROXY_PORT}` : ''}` :
-        `${HOST || '127.0.0.1'}:${PORT}`;
+        if (!port) {
+          throw new Error(`Error finding port in browser endpoint: ${port}`);
+        }
 
-      const externalProtocol = PROXY_SSL ? 'wss' : 'ws';
+        const sessions = await getTargets({ port });
 
-      if (!port) {
-        throw new Error(`Error finding port in browser endpoint: ${port}`);
-      }
-
-      const sessions = await getTargets({ port });
-
-      return sessions
-        .map((session) => {
-          const wsEndpoint = browser._wsEndpoint;
-          const proxyParams = {
-            host: externalHost,
-            protocol: externalProtocol,
-            slashes: true,
-          };
-
-          const parsedWebSocketDebuggerUrl = {
-            ...url.parse(session.webSocketDebuggerUrl),
-            ...proxyParams,
-          };
-
-          const parsedWsEndpoint = {
-            ...url.parse(wsEndpoint),
-            ...proxyParams,
-          };
-
-          const browserWSEndpoint = url.format(parsedWsEndpoint);
-          const webSocketDebuggerUrl = url.format(parsedWebSocketDebuggerUrl);
-          const devtoolsFrontendUrl = url.format({
-            pathname: url.parse(session.devtoolsFrontendUrl).pathname,
-            search: `?${externalProtocol}=${externalHost}${parsedWebSocketDebuggerUrl.path}`,
-          });
-
-          return {
-            ...session,
-            browserId: browser._id,
-            browserWSEndpoint,
-            devtoolsFrontendUrl,
-            port,
-            trackingId: browser._trackingId,
-            webSocketDebuggerUrl,
-          };
-        });
-    }),
+        return sessions
+          .map((session) => injectHostIntoSession(externalURL, browser, session));
+      }),
   );
 
   return _.flatten(results);
@@ -486,19 +480,19 @@ export const launchChrome = async (opts: ILaunchOptions, isPreboot: boolean): Pr
     puppeteer.connect({ browserWSEndpoint })
 
   return iBrowser.then((browser) => setupBrowser({
-      blockAds: opts.blockAds,
-      browser,
-      browserlessDataDir,
-      browserWSEndpoint,
-      isUsingTempDataDir,
-      keepalive: opts.keepalive || null,
-      pauseOnConnect: opts.pauseOnConnect,
-      process: browserServer.process(),
-      trackingId: opts.trackingId || null,
-      windowSize: undefined,
-      prebooted: isPreboot,
-      browserServer,
-    }));
+    blockAds: opts.blockAds,
+    browser,
+    browserlessDataDir,
+    browserWSEndpoint,
+    isUsingTempDataDir,
+    keepalive: opts.keepalive || null,
+    pauseOnConnect: opts.pauseOnConnect,
+    process: browserServer.process(),
+    trackingId: opts.trackingId || null,
+    windowSize: undefined,
+    prebooted: isPreboot,
+    browserServer,
+  }));
 };
 
 export const launchChromeDriver = async ({
