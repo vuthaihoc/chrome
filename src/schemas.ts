@@ -115,7 +115,7 @@ export const screenshot = Joi.object().keys({
     fullPage: Joi.boolean(),
     omitBackground: Joi.boolean(),
     quality: Joi.number().min(0).max(100),
-    type: Joi.string().valid('jpeg', 'png'),
+    type: Joi.string().valid('jpeg', 'png', 'webp'),
   }),
   rejectRequestPattern,
   rejectResourceTypes,

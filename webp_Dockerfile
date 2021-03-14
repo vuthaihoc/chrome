@@ -1,0 +1,12 @@
+FROM browserless/chrome:latest
+
+COPY ./functions/screenshot.js /usr/src/app/functions/screenshot.js
+COPY ./src/schemas.ts /usr/src/app/src/schemas.ts
+
+USER root
+
+WORKDIR /usr/src/app
+RUN npm run build &&\
+  chown -R blessuser:blessuser /usr/src/app
+
+USER blessuser

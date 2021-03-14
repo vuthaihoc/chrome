@@ -126,7 +126,17 @@ module.exports = async function screenshot ({ page, context } = {}) {
     }
   }
 
-  const data = await page.screenshot(options);
+  let data = '';
+
+  if(options.type == 'webp'){
+    options.type = 'png';
+    data = await page.screenshot(options);
+    options.type = 'webp';
+  }else{
+    data = await page.screenshot(options);
+  }
+
+  
 
   const headers = {
     'x-response-code': response.status(),
@@ -135,7 +145,7 @@ module.exports = async function screenshot ({ page, context } = {}) {
     'x-response-port': response.remoteAddress().port,
   };
 
-  if (manipulate) {
+  if (manipulate || options.type == 'webp') {
     const sharp = require('sharp');
     const chain = sharp(data);
 
@@ -153,6 +163,10 @@ module.exports = async function screenshot ({ page, context } = {}) {
 
     if (manipulate.rotate) {
       chain.rotate(manipulate.rotate);
+    }
+
+    if(options.type == 'webp'){
+      chain.webp();
     }
 
     return {
