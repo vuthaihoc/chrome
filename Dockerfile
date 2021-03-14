@@ -1,4 +1,4 @@
-FROM browserless/base:1.7.0
+FROM browserless/base:1.8.0
 
 # Build Args
 ARG USE_CHROME_STABLE
@@ -42,7 +42,7 @@ RUN if [ "$USE_CHROME_STABLE" = "true" ]; then \
     export CHROMEDRIVER_SKIP_DOWNLOAD=true;\
   fi &&\
   npm i puppeteer@$PUPPETEER_VERSION;\
-  npm run post-install &&\
+  npm run postinstall &&\
   npm run build &&\
   chown -R blessuser:blessuser $APP_DIR
 

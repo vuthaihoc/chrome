@@ -7,8 +7,6 @@ import net from 'net';
 import puppeteer from 'puppeteer';
 import url from 'url';
 
-import { BrowserlessSandbox } from './Sandbox';
-
 export interface IChromeDriver {
   port: number;
   chromeProcess: ChildProcess;
@@ -91,6 +89,7 @@ export interface IBrowserlessStats {
   error: number;
   queued: number;
   rejected: number;
+  unhealthy: number;
   memory: number | null;
   cpu: number | null;
   timedout: number;
@@ -150,7 +149,6 @@ export interface IChromeServiceConfiguration {
   maxConcurrentSessions: number;
   maxQueueLength: number;
   prebootChrome: boolean;
-  demoMode: boolean;
   functionExternals: string[];
   functionEnableIncognitoMode: boolean;
   functionBuiltIns: string[];
@@ -193,7 +191,7 @@ export interface IResourceLoad {
 export interface IJob {
   (done?: IDone): any | Promise<any>;
   id?: string;
-  browser?: IBrowser | BrowserlessSandbox | null;
+  browser?: IBrowser | null;
   close?: () => any;
   onTimeout?: () => any;
   start: number;

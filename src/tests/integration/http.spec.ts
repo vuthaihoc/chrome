@@ -444,6 +444,11 @@ describe('Browserless Chrome HTTP', () => {
         method: 'POST',
       })
         .then((res) => {
+          expect(res.headers.get('x-response-code')).toBeDefined();
+          expect(res.headers.get('x-response-url')).toBeDefined();
+          expect(res.headers.get('x-response-ip')).toBeDefined();
+          expect(res.headers.get('x-response-por')).toBeDefined();
+          expect(res.headers.get('content-type')).toEqual('image/png');
           expect(res.headers.get('content-type')).toEqual('image/png');
           expect(res.status).toBe(200);
         });
@@ -760,7 +765,7 @@ describe('Browserless Chrome HTTP', () => {
         code: `module.exports = async ({ page }) => {
           await page.setViewport({ width: 640, height: 480 });
           await page.goto('https://example.com/');
-          await new Promise(r => setTimeout(r, 5000));
+          await new Promise(r => global.setTimeout(r, 5000));
         }`,
       };
 
@@ -786,7 +791,7 @@ describe('Browserless Chrome HTTP', () => {
       const body = `module.exports = async ({ page }) => {
         await page.setViewport({ width: 640, height: 480 });
         await page.goto('https://example.com/');
-        await new Promise(r => setTimeout(r, 5000));
+        await new Promise(r => global.setTimeout(r, 5000));
       }`;
 
       return fetch(`http://127.0.0.1:${params.port}/screencast?--window-size=640,480`, {
@@ -879,6 +884,10 @@ describe('Browserless Chrome HTTP', () => {
         method: 'POST',
       })
         .then((res) => {
+          expect(res.headers.get('x-response-code')).toBeDefined();
+          expect(res.headers.get('x-response-url')).toBeDefined();
+          expect(res.headers.get('x-response-ip')).toBeDefined();
+          expect(res.headers.get('x-response-por')).toBeDefined();
           expect(res.headers.get('content-type')).toEqual('application/pdf');
           expect(res.status).toBe(200);
         });
@@ -1192,6 +1201,10 @@ describe('Browserless Chrome HTTP', () => {
         method: 'POST',
       })
         .then((res) => {
+          expect(res.headers.get('x-response-code')).toBeDefined();
+          expect(res.headers.get('x-response-url')).toBeDefined();
+          expect(res.headers.get('x-response-ip')).toBeDefined();
+          expect(res.headers.get('x-response-por')).toBeDefined();
           expect(res.headers.get('content-type')).toEqual('text/html; charset=utf-8');
           expect(res.status).toBe(200);
         });

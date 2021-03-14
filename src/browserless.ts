@@ -158,7 +158,7 @@ export class BrowserlessServer {
       }
     }
 
-    this.metricsInterval = setInterval(this.recordMetrics.bind(this), fiveMinutes);
+    this.metricsInterval = global.setInterval(this.recordMetrics.bind(this), fiveMinutes);
 
     const boundClose = this.close.bind(this);
 
@@ -230,7 +230,7 @@ export class BrowserlessServer {
   public async startServer(): Promise<any> {
     await this.puppeteerProvider.start();
 
-    return new Promise(async (resolve) => {
+    return new Promise(async (r) => {
       // Make sure we have http server setup with some headroom
       // for timeouts (so we can respond with appropriate http codes)
       const httpTimeout = this.config.connectionTimeout === -1 ?
@@ -266,8 +266,9 @@ export class BrowserlessServer {
         app.use(cors());
       }
 
-      if (!this.config.disabledFeatures.includes(Features.DEBUGGER)) {
-        app.use('/', express.static('./debugger'));
+      if (!this.config.disabledFeatures.includes(Features.DEBUG_VIEWER)) {
+        app.use('/devtools', express.static('./devtools'));
+        app.use('/', express.static('./node_modules/browserless-debugger/static'));
       }
 
       if (externalRoutes) {
@@ -334,7 +335,7 @@ export class BrowserlessServer {
           return this.puppeteerProvider.runWebSocket(reqParsed, socket, head);
         }))
         .setTimeout(httpTimeout)
-        .listen(this.config.port, this.config.host, resolve);
+        .listen(this.config.port, this.config.host, undefined, () => r(null));
     });
   }
 
@@ -381,26 +382,48 @@ export class BrowserlessServer {
     process.exit(0);
   }
 
-  public rejectReq(
-    req: express.Request,
-    res: express.Response,
-    code: number,
-    message: string,
-    failureHook?: () => any,
-  ) {
+  public rejectReq({
+    req,
+    res,
+    code,
+    message,
+    metricType,
+    hook,
+  }:{
+    req: express.Request;
+    res: express.Response;
+    code: number;
+    message: string;
+    metricType?: keyof IBrowserlessStats;
+    hook?: () => any;
+  }) {
     debug(`${req.url}: ${message}`);
     res.status(code).send(message);
 
-    if (failureHook) {
-      this.currentStat.rejected++;
-      failureHook();
+    if (metricType) {
+      this.currentStat[metricType]++;
+    }
+
+    if (hook) {
+      hook();
     }
   }
 
-  public rejectSocket(
-    { req, socket, header, message, failureHook }:
-    { req: http.IncomingMessage; socket: Socket; header: string; message: string; failureHook?: () => any; },
-  ) {
+  public rejectSocket({
+    req,
+    socket,
+    header,
+    message,
+    metricType,
+    hook,
+  }: {
+    req: http.IncomingMessage;
+    socket: Socket;
+    header: string;
+    message: string;
+    metricType?: keyof IBrowserlessStats;
+    hook?: () => any;
+  }) {
     if (this.config.socketBehavior === 'http') {
       debug(`${req.url}: ${message}. Behavior of "http" set, writing response and closing.`);
       const httpResponse = util.dedent(`${header}
@@ -418,9 +441,12 @@ export class BrowserlessServer {
       socket.destroy();
     }
 
-    if (failureHook) {
-      this.currentStat.rejected++;
-      failureHook();
+    if (hook) {
+      hook();
+    }
+
+    if (metricType) {
+      this.currentStat[metricType]++;
     }
   }
 
@@ -453,7 +479,7 @@ export class BrowserlessServer {
 
       ret.body = body;
 
-      return this.webdriver.start(ret, res, params);
+      return this.webdriver.start(ret, res, params, this.currentStat);
     }
 
     if (isClosing) {
@@ -514,7 +540,7 @@ export class BrowserlessServer {
 
     if (this.singleRun) {
       debug(`Running in single-run mode, exiting in 1 second`);
-      setTimeout(process.exit, 1000);
+      global.setTimeout(process.exit, 1000);
     }
   }
 
@@ -526,6 +552,7 @@ export class BrowserlessServer {
       memory: 0,
       queued: 0,
       rejected: 0,
+      unhealthy: 0,
       successful: 0,
       timedout: 0,
       totalTime: 0,

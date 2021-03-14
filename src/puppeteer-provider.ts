@@ -1,4 +1,3 @@
-import cookie from 'cookie';
 import _ from 'lodash';
 import net from 'net';
 import { NodeVM } from 'vm2';
@@ -7,10 +6,9 @@ import { BrowserlessServer } from './browserless';
 import * as chromeHelper from './chrome-helper';
 import { EventArray } from './event-array';
 import { Queue } from './queue';
-import { BrowserlessSandbox } from './Sandbox';
 import * as utils from './utils';
 
-import { DEBUGGER_ROUTE, PLAYWRIGHT_ROUTE } from './constants';
+import { PLAYWRIGHT_ROUTE } from './constants';
 
 import {
   IChromeServiceConfiguration,
@@ -96,7 +94,8 @@ export class PuppeteerProvider {
     port: string;
   }) {
     const target = `ws://127.0.0.1:${port}`;
-
+    // Strip tokens/query-params since they break chrome
+    req.url = req.parsed.pathname || '';
     this.server.proxy.ws(req, socket, head, { target });
   }
 
@@ -119,24 +118,28 @@ export class PuppeteerProvider {
 
     jobdebug(`${jobId}: ${req.url}: Inbound HTTP request. Context: ${JSON.stringify(context)}`);
 
-    if (this.config.demoMode) {
-      jobdebug(`${jobId}: Running in demo-mode, closing with 403.`);
-      return this.server.rejectReq(req, res, 403, 'Unauthorized');
-    }
-
     if (!this.queue.hasCapacity) {
       jobdebug(`${jobId}: Too many concurrent and queued requests, rejecting with 429.`);
-      return this.server.rejectReq(req, res, 429, `Too Many Requests`, this.server.capacityFullHook);
+      return this.server.rejectReq({
+        req,
+        res,
+        code: 429,
+        message: `Too Many Requests`,
+        metricType: 'rejected',
+        hook: this.server.capacityFullHook,
+      });
     }
 
     if (await this.queue.overloaded()) {
       jobdebug(`${jobId}: Server under heavy load, rejecting with 503.`);
-      return this.server.rejectReq(req, res, 503, `Server under load`, this.server.sessionCheckFailHook);
-    }
-
-    if (detached) {
-      jobdebug(`${jobId}: Function is detached, resolving request.`);
-      res.json({ id: jobId, trackingId });
+      return this.server.rejectReq({
+        req,
+        res,
+        code: 503,
+        message: `Server under load`,
+        metricType: 'unhealthy',
+        hook: this.server.sessionCheckFailHook,
+      });
     }
 
     const vm = new NodeVM({
@@ -149,6 +152,9 @@ export class PuppeteerProvider {
 
     const handler: (args: any) => Promise<any> = vm.run(code, `browserless-function-${jobId}.js`);
     const earlyClose = () => {
+      if (detached) {
+        return;
+      }
       jobdebug(`${job.id}: Function terminated prior to execution removing from queue`);
       this.removeJob(job);
     };
@@ -176,6 +182,11 @@ export class PuppeteerProvider {
         this.getChrome(launchOpts)
           .then(async (browser) => {
             jobdetaildebug(`${job.id}: Executing function.`);
+
+            if (detached) {
+              jobdebug(`${jobId}: Function is detached, resolving request.`);
+              res.json({ id: jobId, trackingId });
+            }
             const page = await this.newPage(browser);
             let beforeArgs = {};
 
@@ -198,6 +209,9 @@ export class PuppeteerProvider {
             req.removeListener('close', earlyClose);
             browser.once('disconnected', doneOnce);
             req.once('close', () => {
+              if (detached) {
+                return;
+              }
               debug(`Request terminated during execution, closing`);
               doneOnce();
             });
@@ -209,7 +223,7 @@ export class PuppeteerProvider {
               page,
               timeout: this.config.connectionTimeout,
             }))
-              .then(async ({ data, type = 'text/plain' } = {}) => {
+              .then(async ({ data, type = 'text/plain', headers = {} } = {}) => {
 
                 // If there's a specified "after" hook allow that to run
                 if (after) {
@@ -234,6 +248,20 @@ export class PuppeteerProvider {
                 }
 
                 res.type(type);
+
+                if (headers) {
+                  Object.keys(headers).forEach((key) => {
+                    const hasValue = (
+                      headers.hasOwnProperty(key) &&
+                      headers[key] !== null &&
+                      headers[key] !== undefined &&
+                      headers[key] !== ''
+                    );
+                    if (hasValue) {
+                      res.setHeader(key, headers[key]);
+                    }
+                  });
+                }
 
                 if (Buffer.isBuffer(data)) {
                   res.end(data, 'binary');
@@ -278,10 +306,6 @@ export class PuppeteerProvider {
     const jobId = utils.id();
     const parsedUrl = req.parsed;
     const route = parsedUrl.pathname || '/';
-    const hasDebugCode = parsedUrl.pathname && parsedUrl.pathname.includes(DEBUGGER_ROUTE);
-    const debugCode = hasDebugCode ?
-      cookie.parse(req.headers.cookie || '')[utils.codeCookieName] :
-      '';
 
     jobdebug(`${jobId}: ${req.url}: Inbound WebSocket request.`);
 
@@ -314,22 +338,13 @@ export class PuppeteerProvider {
       });
     }
 
-    if (this.config.demoMode && !debugCode) {
-      jobdebug(`${jobId}: No demo code sent, running in demo mode, closing with 403.`);
-      return this.server.rejectSocket({
-        header: `HTTP/1.1 403 Forbidden`,
-        message: `Forbidden`,
-        req,
-        socket,
-      });
-    }
-
     if (!this.queue.hasCapacity) {
       jobdebug(`${jobId}: Too many concurrent and queued requests, rejecting with 429.`);
       return this.server.rejectSocket({
         header: `HTTP/1.1 429 Too Many Requests`,
         message: `Too Many Requests`,
-        failureHook: this.server.capacityFullHook,
+        metricType: 'rejected',
+        hook: this.server.capacityFullHook,
         req,
         socket,
       });
@@ -340,7 +355,8 @@ export class PuppeteerProvider {
       return this.server.rejectSocket({
         header: `HTTP/1.1 503 Server under load`,
         message: `Server under heavy load, try again later`,
-        failureHook: this.server.sessionCheckFailHook,
+        hook: this.server.sessionCheckFailHook,
+        metricType: 'unhealthy',
         req,
         socket,
       });
@@ -350,97 +366,57 @@ export class PuppeteerProvider {
 
     // If debug code is submitted, sandbox it in
     // its own process to prevent infinite/runaway scripts
-    const handler = debugCode ?
-      (done: IDone) => {
-        jobdebug(`${job.id}: Starting debugger sandbox.`);
-        const doneOnce = _.once((err?: Error) => {
-          if (job.browser) {
-            job.browser.removeListener('disconnected', doneOnce);
-          }
-          done(err);
-        });
-        const code = this.parseUserCode(debugCode, job);
-        const timeout = this.config.connectionTimeout;
-        const handler = new BrowserlessSandbox({
-          code,
-          opts,
-          sandboxOpts: {
-            builtin: this.config.functionBuiltIns,
-            external: this.config.functionExternals,
-            allowFileProtocol: this.config.allowFileProtocol,
-            root: './node_modules',
-          },
-          timeout,
-        });
-        job.browser = handler;
+    const handler = (done: IDone) => {
+      const launchPromise = this.getChrome(opts);
+      jobdebug(`${job.id}: Getting browser.`);
 
+      const doneOnce = _.once((err) => {
+        if (job.browser) {
+          job.browser.removeListener('disconnected', doneOnce);
+        }
+        done(err);
+      });
+
+      launchPromise.then(async (browser) => {
+        jobdebug(`${job.id}: Starting session.`);
+        const browserWsEndpoint = browser._wsEndpoint;
+        job.browser = browser;
+
+        // Cleanup prior listener + listen for socket and browser close
+        // events just in case something doesn't trigger
         socket.removeListener('close', earlyClose);
         socket.once('close', doneOnce);
+        browser.once('disconnected', doneOnce);
 
-        handler.on('launched', ({ port, url }) => {
-          req.url = url;
-          jobdebug(`${job.id}: Got URL ${url}, proxying traffic to ${port}.`);
-          this.server.proxy.ws(req, socket, head, { target: `ws://127.0.0.1:${port}` });
-        });
+        if (route.includes(PLAYWRIGHT_ROUTE) && browser._browserServer) {
+          const playwrightRoute = browser._browserServer.wsEndpoint();
+          jobdebug(`${job.id}: Proxying request to /playwright route: ${playwrightRoute}.`);
+          req.url = '';
 
-        handler.on('error', (err) => {
-          jobdebug(`${job.id}: Debugger crashed, exiting connection`);
-          doneOnce(err);
-          socket.end();
-        });
-      } :
-      (done: IDone) => {
-        const launchPromise = this.getChrome(opts);
-        jobdebug(`${job.id}: Getting browser.`);
+          return playwrightRoute;
+        }
 
-        const doneOnce = _.once((err) => {
-          if (job.browser) {
-            job.browser.removeListener('disconnected', doneOnce);
-          }
-          done(err);
-        });
+        if (!route.includes('/devtools/page')) {
+          jobdebug(`${job.id}: Proxying request to /devtools/browser route: ${browserWsEndpoint}.`);
+          req.url = route;
 
-        launchPromise
-          .then(async (browser) => {
-            jobdebug(`${job.id}: Starting session.`);
-            const browserWsEndpoint = browser._wsEndpoint;
-            job.browser = browser;
+          return browserWsEndpoint;
+        }
 
-            // Cleanup prior listener + listen for socket and browser close
-            // events just in case something doesn't trigger
-            socket.removeListener('close', earlyClose);
-            socket.once('close', doneOnce);
-            browser.once('disconnected', doneOnce);
+        const page: any = await browser.newPage();
+        const port = browser._parsed.port;
+        const pageLocation = `/devtools/page/${page._target._targetId}`;
+        req.url = pageLocation;
 
-            if (route.includes(PLAYWRIGHT_ROUTE) && browser._browserServer) {
-              const playwrightRoute = browser._browserServer.wsEndpoint();
-              jobdebug(`${job.id}: Proxying request to /playwright route: ${playwrightRoute}.`);
-              req.url = '';
-
-              return playwrightRoute;
-            }
-
-            if (!route.includes('/devtools/page')) {
-              jobdebug(`${job.id}: Proxying request to /devtools/browser route: ${browserWsEndpoint}.`);
-              req.url = route;
-
-              return browserWsEndpoint;
-            }
-
-            const page: any = await browser.newPage();
-            const port = browser._parsed.port;
-            const pageLocation = `/devtools/page/${page._target._targetId}`;
-            req.url = pageLocation;
-
-            return `ws://127.0.0.1:${port}`;
-          })
-          .then((target) => this.server.proxy.ws(req, socket, head, { target, changeOrigin: true }))
-          .catch((error) => {
-            jobdebug(error, `${job.id}: Issue launching Chrome or proxying traffic, failing request`);
-            doneOnce(error);
-            socket.end();
-          });
-      };
+        return `ws://127.0.0.1:${port}`;
+      })
+      .then((target) => this.server.proxy.ws(req, socket, head, { target, changeOrigin: true }))
+      .catch((error) => {
+        jobdebug(error, `${job.id}: Issue launching Chrome or proxying traffic, failing request`);
+        doneOnce(error);
+        socket.end();
+      });
+    };
 
     const jobProps = {
       browser: null,
@@ -522,10 +498,6 @@ export class PuppeteerProvider {
       return;
     }
 
-    if (browser instanceof BrowserlessSandbox) {
-      return browser.close();
-    }
-
     const closeChrome = async () => {
       jobdebug(`${job.id}: Browser not needed, closing`);
       await chromeHelper.closeBrowser(browser);
@@ -557,7 +529,7 @@ export class PuppeteerProvider {
     if (browser._keepalive) {
       browser._keepaliveTimeout && clearTimeout(browser._keepaliveTimeout);
       jobdebug(`${job.id}: Browser marked as keep-alive, closing in ${browser._keepalive}ms`);
-      browser._keepaliveTimeout = setTimeout(closeChrome, browser._keepalive);
+      browser._keepaliveTimeout = global.setTimeout(closeChrome, browser._keepalive);
       return;
     }
 
@@ -601,20 +573,6 @@ export class PuppeteerProvider {
 
       return browser;
     });
-  }
-
-  private parseUserCode(code: string, job: IJob): string {
-    jobdebug(`${job.id}: Parsing user-uploaded code: "${code}"`);
-    const codeWithDebugger = code.replace('debugger', 'await page.evaluate(() => { debugger; })');
-    return codeWithDebugger.includes('module.exports') ?
-      codeWithDebugger :
-      `module.exports = async ({ page, context: {} }) => {
-        try {
-          ${codeWithDebugger}
-        } catch (error) {
-          console.error('Unhandled Error:', error.message, error.stack);
-        }
-      }`;
   }
 
   private async launchChrome(opts: ILaunchOptions, isPreboot = false, retries = 1): Promise<IBrowser> {
